@@ -1,0 +1,17 @@
+# Virtual Environment
+venv/
+.env
+
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Project Specific Data
+data/*.json
+data/*.csv
+!data/.gitkeep
+
+# IDE Settings
+.vscode/
+.idea/
