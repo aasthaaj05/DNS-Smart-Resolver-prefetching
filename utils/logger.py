@@ -1,5 +1,4 @@
 """
-utils/logger.py
 Centralised logging setup. All modules call get_logger(__name__).
 Respects the level set in config.yaml.
 """

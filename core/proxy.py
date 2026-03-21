@@ -1,5 +1,4 @@
 """
-core/proxy.py
 UDP DNS proxy — the entry point for all DNS queries on this machine.
 
 Flow for each incoming query:
@@ -49,7 +48,7 @@ class DNSProxy:
         self._running = False
         self._sock: Optional[socket.socket] = None
 
-    # ── Lifecycle ───────────────────────────────────────────────────────────
+    # Lifecycle
 
     def register_callback(self, cb: OnResolvedCallback) -> None:
         """
@@ -98,7 +97,7 @@ class DNSProxy:
             self._sock.close()
         logger.info("DNS proxy stopped")
 
-    # ── Query handling ──────────────────────────────────────────────────────
+    # Query handling 
 
     def _handle_query(self, data: bytes, addr: tuple) -> None:
         """Parse an incoming DNS query, resolve it, send UDP response."""
@@ -137,13 +136,13 @@ class DNSProxy:
     ) -> Optional[dns.message.Message]:
         """Cache-first resolution. Fires background callbacks on miss."""
 
-        # 1. Cache hit
+        # Cache hit
         cached = self._cache.get(domain)
         if cached:
             logger.debug("Serving %s from cache", domain)
             return self._build_response(request, domain, cached, record_type, ttl=60)
 
-        # 2. Cache miss — query upstream
+        # Cache miss — query upstream
         result = self._resolver.resolve(domain, record_type)
 
         if result.success:
@@ -173,7 +172,7 @@ class DNSProxy:
             )
         return self._build_nxdomain(request)
 
-    # ── Response builders ───────────────────────────────────────────────────
+    # Response builders 
 
     @staticmethod
     def _build_response(
@@ -209,7 +208,7 @@ class DNSProxy:
         response.set_rcode(dns.rcode.NXDOMAIN)
         return response
 
-    # ── Callbacks ───────────────────────────────────────────────────────────
+    # Callbacks
 
     def _fire_callbacks(self, domain: str, addresses: List[str]) -> None:
         """Run each registered callback in its own daemon thread."""

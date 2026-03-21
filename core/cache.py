@@ -1,8 +1,7 @@
 """
-core/cache.py
 Adaptive TTL-aware DNS cache.
 
-Public interface (what Persons 2 and 3 depend on):
+Public interface:
     cache = DNSCache()
     cache.set(domain, ip_list, ttl)
     result = cache.get(domain)      # returns list[str] or None
@@ -67,7 +66,7 @@ class DNSCache:
             self._cfg.max_ttl,
         )
 
-    # ── Public interface ────────────────────────────────────────────────────
+    #Public interface
 
     def get(self, domain: str) -> Optional[List[str]]:
         """
@@ -145,8 +144,6 @@ class DNSCache:
                 "capacity": self._cfg.max_entries,
                 "utilisation_pct": round(total / self._cfg.max_entries * 100, 1),
             }
-
-    # ── Internals ───────────────────────────────────────────────────────────
 
     def _clamp_ttl(self, ttl: int) -> int:
         return max(self._cfg.min_ttl, min(ttl, self._cfg.max_ttl))

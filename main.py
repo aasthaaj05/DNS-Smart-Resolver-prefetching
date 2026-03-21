@@ -1,12 +1,4 @@
 """
-main.py  —  Smart DNS Resolver entry point
-
-Wires the four modules together and starts the proxy.
-Person 1 writes the skeleton; Persons 2 & 3 fill in the stubs
-(marked with TODO) once their modules are ready.
-
-Usage:
-    sudo python main.py              # needs root for port 53
     sudo python main.py --port 5353  # unprivileged port for testing
 """
 
@@ -116,7 +108,7 @@ def main():
     logger.info("Config: upstream=%s, cache_max=%d",
                 config.dns.upstream_servers, config.cache.max_entries)
 
-    # ── Instantiate core components ─────────────────────────────────────────
+    # core components 
     cache    = DNSCache()
     resolver = DNSResolver()
     proxy    = DNSProxy(cache, resolver)
@@ -139,7 +131,7 @@ def main():
     signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # ── Print cache stats every 60s in background ──────────────────────────
+    #Print cache stats every 60s in background 
     def stats_reporter():
         import time
         while True:
@@ -149,7 +141,7 @@ def main():
     t = threading.Thread(target=stats_reporter, daemon=True)
     t.start()
 
-    # ── Start proxy (blocking) ──────────────────────────────────────────────
+    # Start proxy (blocking) 
     try:
         proxy.start()
     except PermissionError:

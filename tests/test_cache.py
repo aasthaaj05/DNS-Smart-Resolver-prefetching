@@ -1,6 +1,4 @@
 """
-tests/test_cache.py
-Unit tests for core/cache.py — Person 1 writes and maintains these.
 Run with: python -m pytest tests/test_cache.py -v
 """
 

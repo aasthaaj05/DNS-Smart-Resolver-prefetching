@@ -1,5 +1,4 @@
 """
-core/resolver.py
 Sends DNS queries to upstream servers (e.g. 8.8.8.8) using dnspython.
 Returns structured results that proxy.py and security/ can both use.
 
@@ -59,7 +58,7 @@ class DNSResolver:
             self._upstream_list, self._timeout,
         )
 
-    # ── Public interface ────────────────────────────────────────────────────
+    # Public interface 
 
     def resolve(self, domain: str, record_type: str = "A") -> ResolveResult:
         """
@@ -127,7 +126,7 @@ class DNSResolver:
         except dns.exception.DNSException:
             return False
 
-    # ── Internals ───────────────────────────────────────────────────────────
+    # Internals 
 
     def _query(
         self,

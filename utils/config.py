@@ -1,5 +1,4 @@
 """
-utils/config.py
 Loads config.yaml once at startup and exposes a clean Config object.
 All other modules import from here — never read the YAML directly.
 """
@@ -109,6 +108,4 @@ def load_config(path: str = CONFIG_PATH) -> Config:
         ),
     )
 
-
-# Module-level singleton — import this everywhere
 config = load_config()
