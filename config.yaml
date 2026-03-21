@@ -1,0 +1,31 @@
+# smart_dns_resolver configuration
+
+dns:
+  listen_host: "127.0.0.1"
+  listen_port: 53
+  upstream_servers:
+    - "8.8.8.8"       # Google
+    - "1.1.1.1"       # Cloudflare
+  upstream_port: 53
+  query_timeout: 5    # seconds
+
+cache:
+  default_ttl: 300    # seconds (fallback if DNS response has no TTL)
+  max_ttl: 86400      # 24 hours cap
+  min_ttl: 30         # never cache shorter than this
+  max_entries: 5000
+
+prefetch:
+  enabled: true
+  max_depth: 3        # how deep to follow transitive dependencies
+  max_domains: 50     # max domains to prefetch per page
+
+security:
+  enabled: true
+  check_ns_responsiveness: true
+  same_ip_ns_threshold: 2   # flag if >= N nameservers share an IP
+
+logging:
+  level: "INFO"       # DEBUG | INFO | WARNING | ERROR
+  log_to_file: false
+  log_file: "dns_resolver.log"
