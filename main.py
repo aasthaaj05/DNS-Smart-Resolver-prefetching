@@ -13,7 +13,10 @@ from core.proxy import DNSProxy
 from utils.logger import get_logger
 from utils.config import config
 
+
+
 logger = get_logger(__name__)
+
 
 
 # ── Stub imports (filled in by Persons 2 & 3) ──────────────────────────────
@@ -24,6 +27,8 @@ try:
 except ImportError:
     PREFETCH_AVAILABLE = False
     logger.warning("prefetch module not yet available — running without prefetch")
+
+print("PREFETCH_AVAILABLE =", PREFETCH_AVAILABLE)
 
 # Person 3 will replace these stubs:
 try:
@@ -42,6 +47,7 @@ def build_prefetch_callback(cache: DNSCache, prefetch_engine=None):
     """
     def on_resolved(domain: str, addresses: list) -> None:
         if not PREFETCH_AVAILABLE or prefetch_engine is None:
+            print("Prefetch engine instance:", prefetch_engine)
             return
         try:
             # Person 2: prefetch_engine.run(domain) should:
@@ -119,6 +125,7 @@ def main():
 
     # ── Wire background callbacks into the proxy ────────────────────────────
     proxy.register_callback(build_prefetch_callback(cache, prefetch_engine))
+    print("Prefetch callback registered")
     proxy.register_callback(build_security_callback(resolver, security_checker))
 
     # ── Graceful shutdown on Ctrl-C / SIGTERM ──────────────────────────────
