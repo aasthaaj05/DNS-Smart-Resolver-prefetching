@@ -4,6 +4,8 @@ Run with: python -m pytest tests/test_cache.py -v
 
 import time
 import pytest
+import dns.message
+import dns.query
 from unittest.mock import patch
 
 from core.cache import DNSCache, CacheEntry
@@ -92,3 +94,24 @@ class TestCacheStats:
         assert "live_entries" in stats
         assert "capacity" in stats
         assert stats["total_entries"] == 1
+
+
+
+
+class TestDNSIntegration:
+
+    def test_dns_query(self):
+        domain = "example.com"
+        server = "127.0.0.1"
+        port = 5353
+
+        query = dns.message.make_query(domain, "A")
+
+        start = time.time()
+        response = dns.query.udp(query, server, port=port)
+        end = time.time()
+
+        print(f"\nDomain: {domain}")
+        print(f"Time: {(end - start)*1000:.2f} ms")
+
+        assert response.answer is not None
