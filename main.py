@@ -12,7 +12,7 @@ from core.resolver import DNSResolver
 from core.proxy import DNSProxy
 from utils.logger import get_logger
 from utils.config import config
-
+from graph.graph_builder import DependencyGraph
 
 
 logger = get_logger(__name__)
@@ -87,6 +87,23 @@ def build_security_callback(resolver: DNSResolver, security_checker=None):
     on_resolved.__name__ = "security_callback"
     return on_resolved
 
+def build_graph_callback(graph):
+    def on_resolved(domain, addresses):
+        try:
+            graph.build_from_domain(domain)
+
+            deps = graph.get_dependencies(domain)
+
+            print(f"\n[GRAPH] {domain}")
+            print(f"Dependencies: {deps}")
+            print(f"Dependency count: {graph.get_dependency_count(domain)}")
+            print(f"Max depth: {graph.get_max_depth(domain)}")
+
+        except Exception:
+            logger.error("Graph build failed for %s", domain, exc_info=True)
+
+    on_resolved.__name__ = "graph_callback"
+    return on_resolved
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Smart DNS Resolver")
@@ -117,6 +134,7 @@ def main():
     # core components 
     cache    = DNSCache()
     resolver = DNSResolver()
+    graph = DependencyGraph()
     proxy    = DNSProxy(cache, resolver)
 
     # ── Instantiate optional modules (stubs until Persons 2 & 3 are ready) ─
@@ -126,6 +144,7 @@ def main():
     # ── Wire background callbacks into the proxy ────────────────────────────
     proxy.register_callback(build_prefetch_callback(cache, prefetch_engine))
     print("Prefetch callback registered")
+    proxy.register_callback(build_graph_callback(graph))
     proxy.register_callback(build_security_callback(resolver, security_checker))
 
     # ── Graceful shutdown on Ctrl-C / SIGTERM ──────────────────────────────
@@ -144,6 +163,7 @@ def main():
         while True:
             time.sleep(60)
             logger.info("Cache stats: %s", cache.stats())
+            graph.print_summary()
 
     t = threading.Thread(target=stats_reporter, daemon=True)
     t.start()

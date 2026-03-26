@@ -9,10 +9,17 @@ class HTMLDependencyExtractor:
 
     def fetch_html(self, domain: str) -> str:
         try:
+        # Try HTTPS first
+         url = f"https://{domain}"
+         response = requests.get(url, timeout=self.timeout)
+         return response.text
+        except Exception:
+         try:
+            # Fallback to HTTP
             url = f"http://{domain}"
             response = requests.get(url, timeout=self.timeout)
             return response.text
-        except Exception:
+         except Exception:
             return ""
 
     def extract_domains(self, domain: str) -> set:
