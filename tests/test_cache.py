@@ -115,3 +115,54 @@ class TestDNSIntegration:
         print(f"Time: {(end - start)*1000:.2f} ms")
 
         assert response.answer is not None
+
+class TestMarkovIntegration:
+
+    def test_markov_prefetch_flow(self):
+        """
+        Simulates user navigation pattern and checks
+        if Markov prediction kicks in.
+        """
+
+        server = "127.0.0.1"
+        port = 5353
+
+        def query(domain):
+            q = dns.message.make_query(domain, "A")
+            dns.query.udp(q, server, port=port)
+
+        # Step 1: Train pattern
+        query("google.com")
+        query("youtube.com")
+
+        query("google.com")
+        query("youtube.com")
+
+        # Step 2: Trigger prediction
+        query("google.com")
+
+        print("\nCheck logs for [MARKOV] predictions")
+    
+    
+
+class TestMarkovScoring:
+
+    def test_scoring_prioritization(self):
+        from prefetch.markov import MarkovPredictor
+
+        predictor = MarkovPredictor()
+
+        # Simulate behavior
+        sequence = [
+            "a.com", "b.com", "c.com",
+            "a.com", "b.com", "c.com",
+            "a.com", "b.com", "d.com"
+        ]
+
+        for d in sequence:
+            predictor.update(d)
+
+        preds = predictor.predict("a.com", "b.com")
+
+        # c.com should rank higher than d.com
+        assert preds[0] == "c.com"
