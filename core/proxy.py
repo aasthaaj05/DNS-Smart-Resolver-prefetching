@@ -4,7 +4,7 @@ UDP DNS proxy — the entry point for all DNS queries on this machine.
 Flow for each incoming query:
   1. Receive raw UDP DNS packet from the OS
   2. Parse domain name from the query
-  3. Check cache  →  hit: return cached response immediately
+  3. Check cache  →  hit: return cached response with real remaining TTL
   4.              →  miss: call resolver, cache result, return response
   5. Fire background tasks (prefetch, security) via callbacks
      (callbacks are registered by main.py so proxy.py stays decoupled)
@@ -28,6 +28,12 @@ from utils.logger import get_logger
 from utils.config import config
 
 logger = get_logger(__name__)
+
+# DNS UDP buffer size.
+# FIX: raised from 512 (legacy limit) to 4096 to handle EDNS0 extensions,
+# which are used by virtually all modern resolvers and can push responses
+# well past the original 512-byte ceiling.
+_UDP_BUFFER = 4096
 
 # Type alias for background task callbacks registered by main.py
 OnResolvedCallback = Callable[[str, List[str]], None]
@@ -80,7 +86,8 @@ class DNSProxy:
 
         while self._running:
             try:
-                data, addr = self._sock.recvfrom(512)  # DNS max UDP payload
+                # FIX: use _UDP_BUFFER (4096) instead of the legacy 512-byte cap
+                data, addr = self._sock.recvfrom(_UDP_BUFFER)
                 t = threading.Thread(
                     target=self._handle_query,
                     args=(data, addr),
@@ -98,7 +105,6 @@ class DNSProxy:
         logger.info("DNS proxy stopped")
 
     # Query handling 
-
     def _handle_query(self, data: bytes, addr: tuple) -> None:
         """Parse an incoming DNS query, resolve it, send UDP response."""
         try:
@@ -136,11 +142,16 @@ class DNSProxy:
     ) -> Optional[dns.message.Message]:
         """Cache-first resolution. Fires background callbacks on miss."""
 
-        # Cache hit
-        cached = self._cache.get(domain)
-        if cached:
-            logger.debug("Serving %s from cache", domain)
-            return self._build_response(request, domain, cached, record_type, ttl=60)
+        # FIX: use get_with_ttl() so the response carries the real remaining
+        # TTL rather than the old hardcoded ttl=60 fallback. Clients now get
+        # accurate expiry information and won't re-query 60 s earlier than
+        # necessary for entries with a longer TTL.
+        cached_addresses, remaining_ttl = self._cache.get_with_ttl(domain)
+        if cached_addresses is not None:
+            logger.debug("Serving %s from cache (remaining TTL %ds)", domain, remaining_ttl)
+            return self._build_response(
+                request, domain, cached_addresses, record_type, ttl=remaining_ttl
+            )
 
         # Cache miss — query upstream
         result = self._resolver.resolve(domain, record_type)
@@ -208,7 +219,7 @@ class DNSProxy:
         response.set_rcode(dns.rcode.NXDOMAIN)
         return response
 
-    # Callbacks
+    # ── Callbacks ───────────────────────────────────────────────────────────
 
     def _fire_callbacks(self, domain: str, addresses: List[str]) -> None:
         """Run each registered callback in its own daemon thread."""

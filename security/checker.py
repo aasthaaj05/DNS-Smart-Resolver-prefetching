@@ -14,12 +14,18 @@ Internally orchestrates:
   4. Score everything       (via RiskScorer)
   5. Return SecurityReport
 
-Results are cached in-memory so the same domain is not re-checked
-within a cooldown window (default 10 minutes) — NS checks involve
-real network calls and we don't want to hammer upstream on every query.
+Results are stored in `_report_cache` (renamed from `_cache` to avoid
+ambiguity with the DNS cache used elsewhere) so the same domain is not
+re-checked within a cooldown window (default 10 minutes) — NS checks
+involve real network calls and we don't want to hammer upstream on every
+query.
+
+The report cache is protected by a lock so concurrent callbacks from the
+proxy's daemon threads cannot race on the same domain entry.
 """
 
 import time
+import threading
 from typing import Dict, Optional
 
 from security.lame_detector import LameDetector
@@ -36,15 +42,25 @@ _RECHECK_COOLDOWN = 600  # 10 minutes
 class SecurityChecker:
     """
     Orchestrates NS record fetching, lame detection, and risk scoring.
-    Thread-safe: each check is self-contained and the result cache is
-    only written once per domain per cooldown window.
+
+    Thread-safe: `_report_cache` is protected by `_report_lock` so that
+    concurrent proxy callbacks cannot produce duplicate NS lookups for the
+    same domain.
     """
 
     def __init__(self, resolver):
         self._resolver = resolver
         self._lame_detector = LameDetector(resolver)
         self._risk_scorer = RiskScorer()
-        self._cache: Dict[str, tuple] = {}   # domain → (report, timestamp)
+
+        # FIX: renamed from `_cache` → `_report_cache` to make it immediately
+        # clear this stores SecurityReport objects, not DNS address records.
+        # The old name was easily confused with the DNSCache instance in main.py.
+        self._report_cache: Dict[str, tuple] = {}   # domain → (SecurityReport, timestamp)
+
+        # FIX: added a lock so concurrent proxy daemon threads don't race on
+        # the same domain entry and trigger duplicate upstream NS lookups.
+        self._report_lock = threading.Lock()
 
     def check(self, domain: str) -> Optional[SecurityReport]:
         """
@@ -55,16 +71,17 @@ class SecurityChecker:
         domain = domain.rstrip(".")
 
         # Return cached result if still fresh
-        cached = self._cache.get(domain)
-        if cached:
-            report, ts = cached
-            if time.time() - ts < _RECHECK_COOLDOWN:
-                logger.debug("Security cache hit for %s", domain)
-                return report
+        with self._report_lock:
+            cached = self._report_cache.get(domain)
+            if cached:
+                report, ts = cached
+                if time.time() - ts < _RECHECK_COOLDOWN:
+                    logger.debug("Security report cache hit for %s", domain)
+                    return report
 
         logger.debug("Running security check for %s", domain)
 
-        # Step 1: fetch NS records
+        # Step 1: fetch NS records (done outside the lock — network I/O)
         ns_records = self._resolver.resolve_ns(domain)
 
         if not ns_records:
@@ -73,7 +90,7 @@ class SecurityChecker:
             )
             return None
 
-        # Step 2: detect lame nameservers
+        # Step 2: detect lame nameservers (network I/O — outside lock)
         lame = []
         if config.security.check_ns_responsiveness:
             lame = self._lame_detector.find_lame_nameservers(domain, ns_records)
@@ -89,26 +106,36 @@ class SecurityChecker:
             cyclic=cyclic,
         )
 
-        # Step 5: cache and return
-        self._cache[domain] = (report, time.time())
+        # Step 5: store in report cache and return
+        with self._report_lock:
+            self._report_cache[domain] = (report, time.time())
+
         return report
 
     def clear_cache(self) -> None:
         """Force re-check on next call for all domains."""
-        self._cache.clear()
+        with self._report_lock:
+            self._report_cache.clear()
 
     def cached_reports(self) -> Dict[str, SecurityReport]:
         """Return all cached reports — useful for a summary dashboard."""
-        return {domain: report for domain, (report, _) in self._cache.items()}
+        with self._report_lock:
+            return {
+                domain: report
+                for domain, (report, _) in self._report_cache.items()
+            }
 
     def summary(self) -> None:
         """Print a human-readable summary of all checked domains."""
         print("\n--- Security Summary ---")
-        if not self._cache:
+        with self._report_lock:
+            snapshot = dict(self._report_cache)
+
+        if not snapshot:
             print("No domains checked yet.")
             return
 
-        for domain, (report, ts) in self._cache.items():
+        for domain, (report, _ts) in snapshot.items():
             flag = {
                 "Low":    "  OK",
                 "Medium": "WARN",
