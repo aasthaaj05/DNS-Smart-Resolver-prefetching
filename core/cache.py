@@ -4,14 +4,15 @@ Adaptive TTL-aware DNS cache.
 Public interface:
     cache = DNSCache()
     cache.set(domain, ip_list, ttl)
-    result = cache.get(domain)      # returns list[str] or None
+    result = cache.get(domain)                    # returns list[str] or None
+    result, ttl = cache.get_with_ttl(domain)      # returns (list[str], int) or (None, 0)
     cache.invalidate(domain)
     stats = cache.stats()
 """
 
 import time
 import threading
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass, field
 
 from utils.logger import get_logger
@@ -72,12 +73,21 @@ class DNSCache:
             self._cfg.max_ttl,
         )
 
-    #Public interface
-
     def get(self, domain: str) -> Optional[List[str]]:
         """
         Return cached IP list for domain, or None on miss/expiry.
         Increments hit_count on a successful hit.
+        """
+        addresses, _ = self.get_with_ttl(domain)
+        return addresses
+
+    def get_with_ttl(self, domain: str) -> Tuple[Optional[List[str]], int]:
+        """
+        Return (addresses, remaining_ttl) for domain, or (None, 0) on miss/expiry.
+        Increments hit_count on a successful hit.
+
+        Used by proxy.py so cache hits carry the real remaining TTL rather
+        than a hardcoded fallback value.
         """
         domain = domain.rstrip(".")
         with self._lock:
@@ -87,7 +97,7 @@ class DNSCache:
                 self._misses += 1
             
                 logger.debug("Cache MISS: %s", domain)
-                return None
+                return None, 0
             if entry.is_expired:
                 self._misses += 1
                 logger.debug("Cache EXPIRED: %s (ttl was %ds)", domain, entry.ttl)
@@ -95,11 +105,12 @@ class DNSCache:
                 return None
             self._hits += 1
             entry.hit_count += 1
+            remaining = entry.remaining_ttl
             logger.debug(
                 "Cache HIT: %s -> %s (remaining %ds, hits=%d)",
-                domain, entry.addresses, entry.remaining_ttl, entry.hit_count,
+                domain, entry.addresses, remaining, entry.hit_count,
             )
-            return list(entry.addresses)
+            return list(entry.addresses), remaining
 
     def set(self, domain: str, addresses: List[str], ttl: Optional[int] = None) -> None:
         """
@@ -180,14 +191,22 @@ class DNSCache:
         logger.debug("Cache EVICT (capacity): %s", oldest)
 
     def _sweep_expired(self) -> int:
-        """Remove all expired entries. Returns count removed."""
+        """
+        Remove all expired entries. Returns count removed.
+
+        FIX: the log call and the return value are now computed *inside* the
+        lock so that `expired_keys` is always in scope, eliminating the
+        NameError risk that existed when the `if expired_keys:` branch ran
+        outside the `with` block after a potential mid-block exception.
+        """
         with self._lock:
             expired_keys = [d for d, e in self._store.items() if e.is_expired]
             for key in expired_keys:
                 del self._store[key]
-        if expired_keys:
-            logger.debug("Cache sweep: removed %d expired entries", len(expired_keys))
-        return len(expired_keys)
+            count = len(expired_keys)
+            if count:
+                logger.debug("Cache sweep: removed %d expired entries", count)
+        return count
 
     def _sweep_loop(self) -> None:
         """Background daemon thread — sweeps expired entries every 60s."""

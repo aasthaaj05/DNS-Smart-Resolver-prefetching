@@ -1,59 +1,57 @@
 """
-    sudo python main.py --port 5353  # unprivileged port for testing
+Wires all four modules together and starts the proxy.
+
+Usage:
+    python main.py --port 5353   # no sudo needed for testing
+    sudo python main.py          # port 53, full deployment
 """
 
 import argparse
 import signal
 import sys
 import threading
+import time
 
 from core.cache import DNSCache
 from core.resolver import DNSResolver
 from core.proxy import DNSProxy
 from utils.logger import get_logger
 from utils.config import config
-
-
+from graph.graph_builder import DependencyGraph
 
 logger = get_logger(__name__)
 
 
-
-# ── Stub imports (filled in by Persons 2 & 3) ──────────────────────────────
-# Person 2 will replace these stubs:
+# Module availability checks 
 try:
     from prefetch.prefetcher import PrefetchEngine
     PREFETCH_AVAILABLE = True
+    logger.info("Prefetch module loaded (with Markov predictor)")
 except ImportError:
     PREFETCH_AVAILABLE = False
-    logger.warning("prefetch module not yet available — running without prefetch")
+    logger.warning("prefetch module not available — running without prefetch")
 
-print("PREFETCH_AVAILABLE =", PREFETCH_AVAILABLE)
-
-# Person 3 will replace these stubs:
 try:
     from security.checker import SecurityChecker
     SECURITY_AVAILABLE = True
+    logger.info("Security module loaded")
 except ImportError:
     SECURITY_AVAILABLE = False
-    logger.warning("security module not yet available — running without security checks")
-# ──────────────────────────────────────────────────────────────────────────
+    logger.warning("security module not available — running without security checks")
 
-
-def build_prefetch_callback(cache: DNSCache, prefetch_engine=None):
+def build_prefetch_callback(prefetch_engine):
     """
-    Returns a callback function for proxy.register_callback().
-    When a domain resolves, fetches its HTML and pre-resolves dependencies.
+    Fires PrefetchEngine.run(domain) in background after each resolution.
+    PrefetchEngine (Person 2):
+      - Fetches HTML, extracts dependency domains
+      - Scores + ranks them (CDN boost, Markov boost)
+      - Parallel-resolves top-N into cache
+      - Updates Markov transition model
     """
     def on_resolved(domain: str, addresses: list) -> None:
-        if not PREFETCH_AVAILABLE or prefetch_engine is None:
-            print("Prefetch engine instance:", prefetch_engine)
+        if prefetch_engine is None:
             return
         try:
-            # Person 2: prefetch_engine.run(domain) should:
-            #   1. Fetch HTML from http(s)://domain
-            #   2. Extract dependency domains
-            #   3. Resolve each and store in cache
             prefetch_engine.run(domain)
         except Exception:
             logger.error("Prefetch failed for %s", domain, exc_info=True)
@@ -62,24 +60,48 @@ def build_prefetch_callback(cache: DNSCache, prefetch_engine=None):
     return on_resolved
 
 
-def build_security_callback(resolver: DNSResolver, security_checker=None):
+def build_graph_callback(graph: DependencyGraph):
     """
-    Returns a callback function for proxy.register_callback().
-    Runs a background NS robustness check after each new resolution.
+    Fires DependencyGraph.build_from_domain(domain) after each resolution.
+    DependencyGraph (Person 2):
+      - Extracts HTML deps and stores in adjacency list
+      - Tracks dependency counts and max chain depth
     """
     def on_resolved(domain: str, addresses: list) -> None:
-        if not SECURITY_AVAILABLE or security_checker is None:
+        try:
+            graph.build_from_domain(domain)
+            deps  = graph.get_dependencies(domain)
+            count = graph.get_dependency_count(domain)
+            depth = graph.get_max_depth(domain)
+            logger.info(
+                "[GRAPH] %s → %d deps, max depth %d: %s",
+                domain, count, depth, deps[:5],  # log first 5 to keep it readable
+            )
+        except Exception:
+            logger.error("Graph build failed for %s", domain, exc_info=True)
+
+    on_resolved.__name__ = "graph_callback"
+    return on_resolved
+
+
+def build_security_callback(security_checker):
+    """
+    Fires SecurityChecker.check(domain) after each resolution.
+    SecurityChecker (Person 3 — you):
+      - Fetches NS records
+      - Detects lame delegations, cyclic deps, shared-IP nameservers
+      - Scores Low / Medium / High risk
+      - Logs a warning for Medium/High
+    """
+    def on_resolved(domain: str, addresses: list) -> None:
+        if security_checker is None:
             return
         try:
-            # Person 3: security_checker.check(domain) should:
-            #   1. Fetch NS records via resolver
-            #   2. Score risk (same-IP NS, lame delegation, etc.)
-            #   3. Log a warning if risk is Medium or High
             report = security_checker.check(domain)
             if report and report.risk_level in ("Medium", "High"):
                 logger.warning(
-                    "Security risk for %s: %s (%s)",
-                    domain, report.risk_level, report.reason,
+                    "[SECURITY] %s risk for %s (score=%d): %s",
+                    report.risk_level, domain, report.score, report.reason,
                 )
         except Exception:
             logger.error("Security check failed for %s", domain, exc_info=True)
@@ -105,50 +127,73 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    # Override config with CLI args if provided
     config.dns.listen_host = args.host
     config.dns.listen_port = args.port
 
     logger.info("=== Smart DNS Resolver starting ===")
-    logger.info("Config: upstream=%s, cache_max=%d",
-                config.dns.upstream_servers, config.cache.max_entries)
+    logger.info(
+        "Config: upstream=%s, port=%d, cache_max=%d",
+        config.dns.upstream_servers,
+        config.dns.listen_port,
+        config.cache.max_entries,
+    )
 
-    # core components 
     cache    = DNSCache()
     resolver = DNSResolver()
     proxy    = DNSProxy(cache, resolver)
+    graph           = DependencyGraph()
+    prefetch_engine = PrefetchEngine(cache, resolver) if PREFETCH_AVAILABLE else None
 
-    # ── Instantiate optional modules (stubs until Persons 2 & 3 are ready) ─
-    prefetch_engine   = PrefetchEngine(cache, resolver) if PREFETCH_AVAILABLE else None
-    security_checker  = SecurityChecker(resolver)       if SECURITY_AVAILABLE else None
+    security_checker = SecurityChecker(resolver) if SECURITY_AVAILABLE else None
 
-    # ── Wire background callbacks into the proxy ────────────────────────────
-    proxy.register_callback(build_prefetch_callback(cache, prefetch_engine))
-    print("Prefetch callback registered")
-    proxy.register_callback(build_security_callback(resolver, security_checker))
+    # Register callbacks (order matters: prefetch → graph → security) 
+    # prefetch first so dependencies are resolved before graph tries to map them
+    proxy.register_callback(build_prefetch_callback(prefetch_engine))
+    proxy.register_callback(build_graph_callback(graph))
+    proxy.register_callback(build_security_callback(security_checker))
 
-    # ── Graceful shutdown on Ctrl-C / SIGTERM ──────────────────────────────
+    logger.info(
+        "Callbacks registered — prefetch=%s, graph=on, security=%s",
+        "on" if PREFETCH_AVAILABLE else "off",
+        "on" if SECURITY_AVAILABLE else "off",
+    )
+
+    # shutdown
     def shutdown(sig, frame):
-        logger.info("Shutdown signal received — stopping proxy...")
+        logger.info("Shutdown signal received — stopping...")
         proxy.stop()
+
+        # Save Markov model on exit so it persists across sessions
+        if prefetch_engine is not None:
+            try:
+                prefetch_engine.predictor.save()
+                logger.info("Markov model saved")
+            except Exception:
+                logger.warning("Could not save Markov model", exc_info=True)
+
         logger.info("Cache stats at shutdown: %s", cache.stats())
+
+        if security_checker is not None:
+            security_checker.summary()
+
+        graph.print_summary()
         sys.exit(0)
 
     signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    #Print cache stats every 60s in background 
+    # Periodic stats reporter (every 60s) 
     def stats_reporter():
-        import time
         while True:
             time.sleep(60)
             logger.info("Cache stats: %s", cache.stats())
+            graph.print_summary()
+            if security_checker is not None:
+                security_checker.summary()
 
-    t = threading.Thread(target=stats_reporter, daemon=True)
-    t.start()
+    threading.Thread(target=stats_reporter, daemon=True).start()
 
-    # Start proxy (blocking) 
+    # Start proxy (blocking)
     try:
         proxy.start()
     except PermissionError:

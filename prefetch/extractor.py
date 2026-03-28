@@ -17,12 +17,18 @@ class HTMLDependencyExtractor:
             )
             return response.text
         except Exception:
-            return ""
+            try:
+            # Fallback to HTTP
+                url = f"http://{domain}"
+                response = requests.get(url, timeout=self.timeout)
+                return response.text
+            except Exception:
+                return ""
 
     def extract_domains(self, domain: str) -> set:
         html = self.fetch_html(domain)
         if not html:
-            return set()
+          return set()
 
         soup = BeautifulSoup(html, "html.parser")
         domains = set()
