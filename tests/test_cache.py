@@ -8,6 +8,8 @@ import dns.message
 import dns.query
 from unittest.mock import patch
 
+from scipy import stats
+
 from core.cache import DNSCache, CacheEntry
 
 
@@ -101,7 +103,7 @@ class TestCacheStats:
 class TestDNSIntegration:
 
     def test_dns_query(self):
-        domain = "example.com"
+        domain = "youtube.com"
         server = "127.0.0.1"
         port = 5353
 
@@ -152,7 +154,6 @@ class TestMarkovScoring:
 
         predictor = MarkovPredictor()
 
-        # Simulate behavior
         sequence = [
             "a.com", "b.com", "c.com",
             "a.com", "b.com", "c.com",
@@ -162,7 +163,84 @@ class TestMarkovScoring:
         for d in sequence:
             predictor.update(d)
 
-        preds = predictor.predict("a.com", "b.com")
+        # NEW API — no args, predictor uses its own history
+        # history ends with [..., "a.com", "b.com", "d.com"]
+        # so we need to simulate "a.com" → "b.com" being the last two
+        # Feed one more trigger to set up the right context
+        predictor.update("a.com")
+        predictor.update("b.com")
 
-        # c.com should rank higher than d.com
-        assert preds[0] == "c.com"
+        preds = predictor.predict(top_k=3)  # ← fixed
+
+        print(f"\nPredictions: {preds}")
+        assert len(preds) > 0, "No predictions returned"
+        assert preds[0] == "c.com", f"Expected c.com first, got {preds}"
+
+class TestCacheMissTiming:
+
+    def test_cache_miss_timing(self):
+        """
+        Measures DNS resolution time for NEW (uncached) domains
+        to observe true cache miss latency.
+        """
+
+        server = "127.0.0.1"
+        port = 5353
+
+        # Use UNIQUE domains each time to force cache miss
+        test_domains = [
+        "github.com",
+        "stackoverflow.com",
+        "wikipedia.org",
+        "reddit.com",
+        "cloudflare.com",
+        "amazon.com",
+        "twitter.com",
+        "linkedin.com",
+        "netflix.com",
+        "discord.com",
+        ]
+
+        times = []
+
+        for domain in test_domains:
+            query = dns.message.make_query(domain, "A")
+
+            start = time.perf_counter()
+            response = dns.query.udp(query, server, port=port)
+            end = time.perf_counter()
+
+            elapsed = (end - start) * 1000  # ms
+            times.append(elapsed)
+
+            print(f"\n[CACHE MISS] {domain}")
+            print(f"Time: {elapsed:.2f} ms")
+
+            assert response is not None
+
+        avg_time = sum(times) / len(times)
+
+        print("\n--- CACHE MISS STATS ---")
+        print(f"Average: {avg_time:.2f} ms")
+        print(f"Min: {min(times):.2f} ms")
+        print(f"Max: {max(times):.2f} ms")
+
+
+    def test_hit_rate_above_90_percent(self, cache):
+    # Load up the cache with some domains
+        domains = [f"domain{i}.com" for i in range(20)]
+        for domain in domains:
+            cache.set(domain, ["1.2.3.4"], ttl=300)
+
+    # Simulate realistic traffic — mostly repeated lookups (hits)
+        for _ in range(9):                    # 9 rounds of hits
+            for domain in domains:
+                cache.get(domain)             # 180 hits total
+
+        cache.get("notcached.com")            # 1 miss
+
+        stats = cache.stats()
+        print(f"\nHit rate: {stats['hit_rate_pct']}%")
+        assert stats["hit_rate_pct"] >= 90.0, (
+            f"Cache hit rate {stats['hit_rate_pct']}% is below 90%"
+        )

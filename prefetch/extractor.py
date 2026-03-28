@@ -4,13 +4,17 @@ from urllib.parse import urlparse, urljoin
 
 
 class HTMLDependencyExtractor:
-    def __init__(self, timeout=3):
+    def __init__(self, timeout=1):  # reduced timeout
         self.timeout = timeout
 
     def fetch_html(self, domain: str) -> str:
         try:
             url = f"http://{domain}"
-            response = requests.get(url, timeout=self.timeout)
+            response = requests.get(
+                url,
+                timeout=self.timeout,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
             return response.text
         except Exception:
             return ""
@@ -23,27 +27,17 @@ class HTMLDependencyExtractor:
         soup = BeautifulSoup(html, "html.parser")
         domains = set()
 
-        # Extract from <script src="">
-        for script in soup.find_all("script", src=True):
-            full_url = urljoin(f"http://{domain}", script["src"])
-            domains.add(self._get_domain(full_url))
+        for tag, attr in [("script", "src"), ("link", "href"), ("img", "src")]:
+            for item in soup.find_all(tag, **{attr: True}):
+                full_url = urljoin(f"http://{domain}", item[attr])
+                d = self._get_domain(full_url)
+                if d and d != domain:
+                    domains.add(d)
 
-        # Extract from <link href="">
-        for link in soup.find_all("link", href=True):
-            full_url = urljoin(f"http://{domain}", link["href"])
-            domains.add(self._get_domain(full_url))
-
-        # Extract from <img src="">
-        for img in soup.find_all("img", src=True):
-            full_url = urljoin(f"http://{domain}", img["src"])
-            domains.add(self._get_domain(full_url))
-
-        # Remove None / empty
-        return {d for d in domains if d and d != domain}
+        return domains
 
     def _get_domain(self, url: str) -> str:
         try:
-            parsed = urlparse(url)
-            return parsed.netloc
+            return urlparse(url).netloc
         except Exception:
             return None
