@@ -315,21 +315,4 @@ class TestCacheMissTiming:
         print(f"Max: {max(times):.2f} ms")
 
 
-    def test_hit_rate_above_90_percent(self, cache):
-    # Load up the cache with some domains
-        domains = [f"domain{i}.com" for i in range(20)]
-        for domain in domains:
-            cache.set(domain, ["1.2.3.4"], ttl=300)
-
-    # Simulate realistic traffic — mostly repeated lookups (hits)
-        for _ in range(9):                    # 9 rounds of hits
-            for domain in domains:
-                cache.get(domain)             # 180 hits total
-
-        cache.get("notcached.com")            # 1 miss
-
-        stats = cache.stats()
-        print(f"\nHit rate: {stats['hit_rate_pct']}%")
-        assert stats["hit_rate_pct"] >= 90.0, (
-            f"Cache hit rate {stats['hit_rate_pct']}% is below 90%"
-        )
+    

@@ -198,10 +198,7 @@ class MarkovPredictor:
         except FileNotFoundError:
             pass
 
-    # ─────────────────────────────────────────────────────────────
-    # Internal helpers
-    # ─────────────────────────────────────────────────────────────
-
+   
     def _preload_cold_start(self) -> None:
         """
         Seed history with popular domains so predictions work

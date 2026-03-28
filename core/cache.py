@@ -40,10 +40,6 @@ class CacheEntry:
     @property
     def remaining_ttl(self) -> int:
         return max(0, int(self.expires_at - time.time()))
-    
-    @property
-    def is_negative(self) -> bool:
-        return self.addresses is None
 
 
 class DNSCache:
@@ -59,8 +55,6 @@ class DNSCache:
         self._store: Dict[str, CacheEntry] = {}
         self._lock = threading.Lock()
         self._cfg = config.cache
-        self._hits = 0        # add this
-        self._misses = 0 
 
         # Start background expiry sweeper (runs every 60 seconds)
         self._sweeper = threading.Thread(target=self._sweep_loop, daemon=True)
@@ -93,17 +87,12 @@ class DNSCache:
         with self._lock:
             entry = self._store.get(domain)
             if entry is None:
-     
-                self._misses += 1
-            
                 logger.debug("Cache MISS: %s", domain)
                 return None, 0
             if entry.is_expired:
-                self._misses += 1
                 logger.debug("Cache EXPIRED: %s (ttl was %ds)", domain, entry.ttl)
                 del self._store[domain]
-                return None
-            self._hits += 1
+                return None, 0
             entry.hit_count += 1
             remaining = entry.remaining_ttl
             logger.debug(
@@ -117,13 +106,7 @@ class DNSCache:
         Store a resolved entry.
         TTL is clamped to [min_ttl, max_ttl].
         Evicts the oldest entry if capacity is exceeded.
-
         """
-
-        if addresses is not None and not addresses:
-            logger.warning("Empty address list for %s", domain)
-            return
-        
         domain = domain.rstrip(".")
         if not addresses:
             logger.warning("Attempted to cache empty address list for %s", domain)
@@ -165,18 +148,12 @@ class DNSCache:
         with self._lock:
             total = len(self._store)
             expired = sum(1 for e in self._store.values() if e.is_expired)
-            total_requests = self._hits + self._misses
             return {
                 "total_entries": total,
                 "live_entries": total - expired,
                 "expired_entries": expired,
                 "capacity": self._cfg.max_entries,
                 "utilisation_pct": round(total / self._cfg.max_entries * 100, 1),
-                "hits": self._hits,                          # add this
-                "misses": self._misses,                      # add this
-                "hit_rate_pct": round(                       # add this
-                    self._hits / total_requests * 100, 1
-                ) if total_requests > 0 else 0.0,
             }
 
     def _clamp_ttl(self, ttl: int) -> int:
