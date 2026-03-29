@@ -1,3 +1,4 @@
+import threading
 from prefetch.extractor import HTMLDependencyExtractor
 
 class DependencyGraph:
@@ -5,13 +6,15 @@ class DependencyGraph:
         # adjacency list: domain → set of dependencies
         self.graph = {}
         self.extractor = HTMLDependencyExtractor() 
+        self.lock = threading.Lock() 
 
     def add_dependency(self, domain, dependencies):
         """
         Add domain → dependencies mapping
         """
-        if domain not in self.graph:
-            self.graph[domain] = set()
+        with self.lock:
+            if domain not in self.graph:
+                self.graph[domain] = set()
 
         for dep in dependencies:
             if dep != domain:
@@ -59,17 +62,22 @@ class DependencyGraph:
         if visited is None:
             visited = set()
 
-        if domain in visited or domain not in self.graph:
+        if domain in visited:
+            return 0
+        
+        if domain not in self.graph:
             return 0
 
         visited.add(domain)
 
-        depths = []
+        max_depth = 0
         for dep in self.graph[domain]:
-            depth = 1 + self.get_max_depth(dep, visited.copy())
-            depths.append(depth)
+            depth = 1 + self.get_max_depth(dep, visited)
+            max_depth = max(max_depth, depth)
 
-        return max(depths, default=0)
+        visited.remove(domain)  
+
+        return max_depth
 
 
     def total_domains(self):
