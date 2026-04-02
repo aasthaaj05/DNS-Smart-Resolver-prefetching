@@ -18,3 +18,4 @@ data/*.csv
 
 markov.key
 markov.json
+node_modules/
