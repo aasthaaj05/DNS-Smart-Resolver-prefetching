@@ -15,3 +15,6 @@ data/*.csv
 # IDE Settings
 .vscode/
 .idea/
+
+markov.key
+markov.json

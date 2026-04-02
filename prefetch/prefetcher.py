@@ -1,4 +1,24 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+"""
+Prefetch Engine — background DNS prefetcher using Markov prediction.
+
+Flow:
+    1. proxy.py fires run(domain) after every resolved query
+    2. run() updates Markov model synchronously (preserves true query order)
+    3. _prefetch_task() runs async — predicts next domains + resolves them
+    4. _resolve_and_cache() uses get_with_ttl() to skip only if TTL > 60s
+    5. Both A and AAAA records are resolved for dual-stack support
+
+Fixes over previous version:
+    - predictor.update() moved to run() — fixes race condition on query order
+    - cache.get_with_ttl() replaces cache.get() — proactive refresh before expiry
+    - resolver.resolve() called for both A and AAAA record types
+    - _score_domains() signature fixed (accepts markov_scores dict)
+    - preds variable renamed correctly (was undefined bug)
+    - duplicate dot-check removed from _is_valid_domain()
+    - dependencies extracted only once, not twice
+"""
+
+from concurrent.futures import ThreadPoolExecutor
 from utils.logger import get_logger
 
 from prefetch.extractor import HTMLDependencyExtractor
@@ -14,108 +34,156 @@ class PrefetchEngine:
         self.extractor = HTMLDependencyExtractor()
         self.predictor = MarkovPredictor()
 
-        #  LIMIT THREADS (prevents slowdown)
+        # Thread pool for prefetch coordination (non-blocking)
         self.pool = ThreadPoolExecutor(max_workers=5)
 
-        #  Separate pool for DNS resolution (parallel lookups)
+        # Separate pool for parallel DNS resolution
         self.resolve_pool = ThreadPoolExecutor(max_workers=10)
 
-        # Load Markov learning
+        # Load previously learned Markov transitions
         self.predictor.load()
 
-   
-    def run(self, domain: str):
-        # Submit prefetch job (non-blocking)
-        self.pool.submit(self._prefetch_task, domain)
+    # ─────────────────────────────────────────────────────────────
+    # Public entry point — called by proxy.py callback
+    # ─────────────────────────────────────────────────────────────
 
-    # ─────────────────────────────
-    def _prefetch_task(self, domain: str):
+    def run(self, domain: str) -> None:
+        """
+        Called synchronously from proxy.py after every resolved query.
 
-        logger.info(f"[PREFETCH] Running for {domain}")
-
-        # Step 1: Learn navigation pattern
+        FIX: predictor.update() is called HERE (synchronously) rather than
+        inside the async task. This preserves the true query arrival order
+        in the Markov history — if two queries arrive simultaneously and
+        both went into the thread pool, their update() order would be
+        non-deterministic. Calling it here ensures history always reflects
+        the real sequence.
+        """
         self.predictor.update(domain)
+
+        # Persist every 10 domain visits
         if len(self.predictor.history) % 10 == 0:
             self.predictor.save()
-        # Step 2: Extract dependencies (HTML)
-        dependencies = list(self.extractor.extract_domains(domain))
 
-        # Step 3: Score + rank
-        #ranked_html = self._score_domains(dependencies)
+        # Submit async prefetch task — does not block proxy response
+        self.pool.submit(self._prefetch_task, domain)
 
-        # LIMIT (CRITICAL for performance)
-        #ranked_html = ranked_html[:5]
+    # ─────────────────────────────────────────────────────────────
+    # Async prefetch task
+    # ─────────────────────────────────────────────────────────────
 
-        #logger.info(f"[PREFETCH] Ranked HTML deps: {ranked_html}")
+    def _prefetch_task(self, domain: str) -> None:
+        """
+        Runs in thread pool. Predicts next domains and resolves them
+        in the background so they are warm in cache before requested.
 
+        Note: predictor.update() already called in run() — do NOT call
+        it again here to avoid double-counting the domain visit.
+        """
+        logger.info(f"[PREFETCH] Running for {domain}")
+
+        # ── Step 1: Markov predictions
         markov_preds = []
-        markov_scores = {} 
-        # Step 4: Markov prediction
-        markov_preds = []
+        markov_scores = {}
+
         if len(self.predictor.history) >= 2:
-           
-            markov_preds = self.predictor.predict(top_k=3, return_scores=True)
-            for d, score in preds:
+            # FIX: was 'preds' (undefined) — now correctly 'scored'
+            scored = self.predictor.predict(top_k=3, return_scores=True)
+            for d, score in scored:
                 if score > 0.3:
                     markov_preds.append(d)
                     markov_scores[d] = score
 
-
-
-
             markov_preds = markov_preds[:3]
-
             logger.info(f"[MARKOV] Predictions: {markov_preds}")
 
+        # ── Step 2: HTML dependency extraction (only if Markov has predictions)
+        # FIX: extracted once here, not twice as before
         dependencies = []
-        if markov_preds:  # only if useful
+        if markov_preds:
             dependencies = list(self.extractor.extract_domains(domain))[:5]
 
-        # STEP 3: Score domains (avoid repeated Markov calls)
-        ranked_html = self._score_domains(dependencies, markov_preds)
+        # ── Step 3: Score HTML dependencies using precomputed markov_scores
+        # FIX: _score_domains() now receives markov_scores dict — no repeated predict() call
+        ranked_html = self._score_domains(dependencies, markov_scores)
 
-        # Step 5: Merge + deduplicate
+        # ── Step 4: Merge Markov predictions + HTML deps, deduplicated
         all_targets = markov_preds + [
             d for d in ranked_html if d not in markov_preds
         ]
 
         logger.info(f"[PREFETCH] Final targets: {all_targets}")
 
-        # STEP 5: Fire-and-forget parallel resolve (NO BLOCKING)
+        # ── Step 5: Resolve all targets in parallel (fire-and-forget)
         for d in all_targets:
-            if not self._is_valid_domain(d):
-                continue
+            if self._is_valid_domain(d):
+                self.resolve_pool.submit(self._resolve_and_cache, d)
 
-            self.resolve_pool.submit(self._resolve_and_cache, d)
+    # ─────────────────────────────────────────────────────────────
+    # Resolution + caching
+    # ─────────────────────────────────────────────────────────────
 
-    # ─────────────────────────────
-    def _resolve_and_cache(self, domain: str):
+    def _resolve_and_cache(self, domain: str) -> None:
+        """
+        Resolve a domain and cache the result.
 
-        # Skip if already cached
-        if self.cache.get(domain):
+        FIX 1: Uses cache.get_with_ttl() instead of cache.get().
+            - If TTL > 60s remaining: skip (still fresh enough)
+            - If TTL < 60s remaining: re-resolve now so it's warm before expiry
+            - If not cached: resolve fresh
+        This is the stale-while-revalidate pattern used by Unbound and Cloudflare.
+
+        FIX 2: Resolves both A and AAAA records for dual-stack IPv4/IPv6 support.
+        """
+        # Check cache with real TTL
+        addresses, remaining_ttl = self.cache.get_with_ttl(domain)
+        if addresses and remaining_ttl > 60:
+            # Still fresh — skip prefetch
             return
 
-        try:
-            result = self.resolver.resolve(domain)
+        if addresses and remaining_ttl <= 60:
+            logger.info(f"[PREFETCH] TTL low ({remaining_ttl}s), refreshing {domain}")
+        else:
+            logger.info(f"[PREFETCH] Cache miss, resolving {domain}")
 
-            if result.success and result.addresses:
-                self.cache.set(domain, result.addresses, result.ttl)
-                logger.info(f"[CACHE] Stored {domain}")
+        # FIX: resolve both A and AAAA for dual-stack support
+        for record_type in ("A", "AAAA"):
+            try:
+                result = self.resolver.resolve(domain, record_type)
+                if result.success and result.addresses:
+                    self.cache.set(domain, result.addresses, result.ttl)
+                    logger.info(
+                        f"[CACHE] Stored {domain} ({record_type}) "
+                        f"-> {result.addresses} (ttl={result.ttl}s)"
+                    )
+            except Exception:
+                logger.error(
+                    f"[PREFETCH] Failed to resolve {domain} ({record_type})",
+                    exc_info=True,
+                )
 
-        except Exception:
-            logger.error(
-                f"[PREFETCH] Failed to resolve {domain}",
-                exc_info=True
-            )
+    # ─────────────────────────────────────────────────────────────
+    # Domain scoring
+    # ─────────────────────────────────────────────────────────────
 
-    # ─────────────────────────────
-    def _score_domains(self, domains):
+    def _score_domains(self, domains: list, markov_scores: dict) -> list:
+        """
+        Score HTML dependency domains for prefetch priority.
+
+        FIX: accepts precomputed markov_scores dict instead of calling
+        predictor.predict() again — avoids redundant prediction call
+        that was previously made inside the scoring loop.
+
+        Scoring factors:
+            +3  CDN / static asset domain
+            +1  Short domain name (< 15 chars, likely important)
+            +5* Markov boost — weighted by actual prediction score
+        """
         scored = []
 
         for d in domains:
             score = 0
 
-            # CDN / static boost
+            # CDN / static asset boost
             if any(x in d for x in ["cdn", "static", "assets", "img"]):
                 score += 3
 
@@ -123,43 +191,41 @@ class PrefetchEngine:
             if len(d) < 15:
                 score += 1
 
-            # Markov boost
-            if len(self.predictor.history) >= 2:
-                prev = self.predictor.history[-2]
-                curr = self.predictor.history[-1]
-
-                preds = self.predictor.predict(prev, curr)
-                if d in preds:
-                    score += 5
+            # Markov boost — use precomputed scores, no extra predict() call
+            if d in markov_scores:
+                score += 5 * markov_scores[d]
 
             scored.append((d, score))
 
-        # Sort descending
         scored.sort(key=lambda x: x[1], reverse=True)
-
         return [d for d, _ in scored]
-    
+
+    # ─────────────────────────────────────────────────────────────
+    # Domain validation
+    # ─────────────────────────────────────────────────────────────
+
     def _is_valid_domain(self, domain: str) -> bool:
+        """
+        Basic sanity check before attempting DNS resolution.
+
+        FIX: removed duplicate dot-check that appeared twice in original.
+        """
         if not domain:
             return False
 
-    #  Must contain dot (basic domain check)
+        # Must contain a dot
         if "." not in domain:
             return False
 
-        # Reject numeric garbage
+        # Reject purely numeric strings
         if domain.isdigit():
             return False
 
-    #  Must contain dot (basic domain check)
-        if "." not in domain:
-            return False
-
-        # Reject android / package style
+        # Reject Android package-style strings (com.example.app)
         if domain.startswith("com.") or domain.startswith("org."):
             return False
 
-    # Reject too long junk
+        # Reject excessively long strings (likely garbage)
         if len(domain) > 50:
             return False
 
