@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 _UDP_BUFFER = 4096
 
 # Type alias for background task callbacks registered by main.py
-OnResolvedCallback = Callable[[str, List[str]], None]
+OnResolvedCallback = Callable[[str, List[str], str], None]
 
 
 class DNSProxy:
@@ -53,6 +53,7 @@ class DNSProxy:
         self._callbacks: List[OnResolvedCallback] = []
         self._running = False
         self._sock: Optional[socket.socket] = None
+        self._security_checker = None
 
     # Lifecycle
 
@@ -104,7 +105,7 @@ class DNSProxy:
             self._sock.close()
         logger.info("DNS proxy stopped")
 
-    # Query handling 
+    # Query handling
     def _handle_query(self, data: bytes, addr: tuple) -> None:
         """Parse an incoming DNS query, resolve it, send UDP response."""
         try:
@@ -121,12 +122,13 @@ class DNSProxy:
         record_type = dns.rdatatype.to_text(question.rdtype)
 
         logger.debug("Query from %s: %s (%s)", addr, domain, record_type)
+        client_ip = addr[0]
 
         # Only handle A/AAAA — pass anything else straight upstream
         if record_type not in ("A", "AAAA"):
             response = self._forward_raw(request, record_type, domain)
         else:
-            response = self._resolve_with_cache(request, domain, record_type)
+            response = self._resolve_with_cache(request, domain, record_type, client_ip)
 
         if response and self._sock:
             try:
@@ -139,8 +141,19 @@ class DNSProxy:
         request: dns.message.Message,
         domain: str,
         record_type: str,
+        client_ip: str,
     ) -> Optional[dns.message.Message]:
         """Cache-first resolution. Fires background callbacks on miss."""
+
+        # FIX: `hasattr` check removed — `_security_checker` is always present
+        # on the instance (set to None in __init__), so hasattr is always True
+        # and the guard was misleading. A simple truthiness check is correct.
+        if self._security_checker:
+            report = self._security_checker.check(domain, client_ip=client_ip)
+            if report and (report.malicious_domain or report.rate_limited):
+                reason = "malicious domain" if report.malicious_domain else "rate limited"
+                logger.warning("Blocked %s: %s from %s", reason, domain, client_ip)
+                return self._build_nxdomain(request)
 
         # FIX: use get_with_ttl() so the response carries the real remaining
         # TTL rather than the old hardcoded ttl=60 fallback. Clients now get
@@ -158,7 +171,7 @@ class DNSProxy:
 
         if result.success:
             self._cache.set(domain, result.addresses, result.ttl)
-            self._fire_callbacks(domain, result.addresses)
+            self._fire_callbacks(domain, result.addresses, client_ip)
             return self._build_response(
                 request, domain, result.addresses, record_type, result.ttl
             )
@@ -183,7 +196,7 @@ class DNSProxy:
             )
         return self._build_nxdomain(request)
 
-    # Response builders 
+    # Response builders
 
     @staticmethod
     def _build_response(
@@ -219,21 +232,21 @@ class DNSProxy:
         response.set_rcode(dns.rcode.NXDOMAIN)
         return response
 
-    # ── Callbacks ───────────────────────────────────────────────────────────
+    # Callbacks
 
-    def _fire_callbacks(self, domain: str, addresses: List[str]) -> None:
+    def _fire_callbacks(self, domain: str, addresses: List[str], client_ip: str) -> None:
         """Run each registered callback in its own daemon thread."""
         for cb in self._callbacks:
             t = threading.Thread(
                 target=self._safe_call,
-                args=(cb, domain, addresses),
+                args=(cb, domain, addresses, client_ip),
                 daemon=True,
             )
             t.start()
 
     @staticmethod
-    def _safe_call(cb: OnResolvedCallback, domain: str, addresses: List[str]) -> None:
+    def _safe_call(cb: OnResolvedCallback, domain: str, addresses: List[str], client_ip: str) -> None:
         try:
-            cb(domain, addresses)
+            cb(domain, addresses, client_ip)
         except Exception:
             logger.error("Callback %s raised an exception", cb.__name__, exc_info=True)

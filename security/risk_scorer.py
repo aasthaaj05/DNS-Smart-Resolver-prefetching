@@ -12,6 +12,12 @@ Scoring rules (additive):
   0      → Low
   1–2    → Medium
   3+     → High
+
+New fields in SecurityReport:
+  - rate_limited      : True if query was blocked by rate limiter
+  - malicious_domain  : True if blocked by malicious detector
+  - malicious_reason  : human-readable reason for malicious block
+  - malicious_type    : "blocklist" | "homoglyph" | "heuristic"
 """
 
 from dataclasses import dataclass, field
@@ -26,12 +32,18 @@ class SecurityReport:
     domain: str
     risk_level: str                  # "Low" | "Medium" | "High"
     score: int
-    reason: str                      # one-line summary for the log warning
-    details: List[str] = field(default_factory=list)   # full breakdown
+    reason: str                      # one-line summary for log warning
+    details: List[str] = field(default_factory=list)
     lame_nameservers: List[str] = field(default_factory=list)
     shared_ip: bool = False
     cyclic: bool = False
     ns_count: int = 0
+
+    # New fields — set by checker.py before NS check runs
+    rate_limited: bool = False
+    malicious_domain: bool = False
+    malicious_reason: Optional[str] = None
+    malicious_type: Optional[str] = None   # "blocklist"|"homoglyph"|"heuristic"
 
 
 class RiskScorer:
@@ -49,17 +61,16 @@ class RiskScorer:
         """
         points = 0
         details = []
-
         ns_count = len(ns_records)
 
-        # Rule 1: lame delegations 
+        # Rule 1: lame delegations
         if lame_nameservers:
             points += 3
             details.append(
                 f"Lame nameservers: {', '.join(lame_nameservers)}"
             )
 
-        # Rule 2: cyclic dependency 
+        # Rule 2: cyclic dependency
         if cyclic:
             points += 3
             details.append("Cyclic NS dependency detected")
@@ -73,14 +84,14 @@ class RiskScorer:
                 f"All {len(ips)} nameservers share the same IP ({ips[0]})"
             )
 
-        # Rule 4: only one nameserver 
+        # Rule 4: only one nameserver
         if ns_count < 2:
             points += 1
             details.append(
                 f"Only {ns_count} nameserver(s) — no redundancy"
             )
 
-        # Rule 5: unresolvable NS IPs 
+        # Rule 5: unresolvable NS IPs
         unresolvable = [ns.nameserver for ns in ns_records if ns.ip is None]
         if unresolvable:
             points += 1
@@ -110,7 +121,7 @@ class RiskScorer:
         )
 
         logger.info(
-            "Security report for %s: %s (score=%d) — %s",
+            "NS security report for %s: %s (score=%d) — %s",
             domain, risk_level, points,
             "; ".join(details) if details else "clean",
         )

@@ -374,7 +374,7 @@ class MarkovPredictor:
         No fake transition counts are introduced.
         """
         for domain in POPULAR_DOMAINS:
-            self.history.append(domain)
+            self.update(domain)
 
     def _record(
         self,
