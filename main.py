@@ -13,6 +13,7 @@ from core.resolver import DNSResolver
 from core.proxy import DNSProxy
 from utils.logger import get_logger
 from utils.config import config
+from graph.graph_builder import DependencyGraph
 
 logger = get_logger(__name__)
 
@@ -100,6 +101,23 @@ def build_security_callback(security_checker=None):
     on_resolved.__name__ = "security_callback"
     return on_resolved
 
+def build_graph_callback(graph):
+    def on_resolved(domain, addresses):
+        try:
+            graph.build_from_domain(domain)
+
+            deps = graph.get_dependencies(domain)
+
+            print(f"\n[GRAPH] {domain}")
+            print(f"Dependencies: {deps}")
+            print(f"Dependency count: {graph.get_dependency_count(domain)}")
+            print(f"Max depth: {graph.get_max_depth(domain)}")
+
+        except Exception:
+            logger.error("Graph build failed for %s", domain, exc_info=True)
+
+    on_resolved.__name__ = "graph_callback"
+    return on_resolved
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Smart DNS Resolver")
@@ -133,6 +151,7 @@ def main():
     # ── Core components ──────────────────────────────────────────────────────
     cache    = DNSCache()
     resolver = DNSResolver()
+    graph = DependencyGraph()
     proxy    = DNSProxy(cache, resolver)
 
     # ── Optional modules ─────────────────────────────────────────────────────
@@ -150,6 +169,7 @@ def main():
         while True:
             time.sleep(60)
             logger.info("Cache stats: %s", cache.stats())
+            graph.print_summary()
             if security_checker:
                 logger.info("Security stats: %s", security_checker.stats())
 

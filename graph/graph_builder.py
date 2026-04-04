@@ -37,6 +37,7 @@ class DependencyGraph:
 
         dependencies = self.extractor.extract_domains(domain)
         self.add_dependency(domain, dependencies)
+        print("Graph:", self.graph)
         return dependencies
     
     def get_dependency_count(self, domain):
